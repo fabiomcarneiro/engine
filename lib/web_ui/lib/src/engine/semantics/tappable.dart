@@ -14,7 +14,7 @@ class Tappable extends RoleManager {
   Tappable(SemanticsObject semanticsObject)
       : super(Role.tappable, semanticsObject);
 
-  html.EventListener _clickListener;
+  html.EventListener? _clickListener;
 
   @override
   void update() {
@@ -23,7 +23,8 @@ class Tappable extends RoleManager {
     semanticsObject.setAriaRole(
         'button', semanticsObject.hasFlag(ui.SemanticsFlag.isButton));
 
-    if (!semanticsObject.hasFlag(ui.SemanticsFlag.isEnabled) &&
+    // Add `aria-disabled` for disabled buttons.
+    if (semanticsObject.enabledState() == EnabledState.disabled &&
         semanticsObject.hasFlag(ui.SemanticsFlag.isButton)) {
       semanticsObject.element.setAttribute('aria-disabled', 'true');
       _stopListening();
@@ -38,7 +39,7 @@ class Tappable extends RoleManager {
                 GestureMode.browserGestures) {
               return;
             }
-            ui.window.onSemanticsAction(
+            EnginePlatformDispatcher.instance.invokeOnSemanticsAction(
                 semanticsObject.id, ui.SemanticsAction.tap, null);
           };
           element.addEventListener('click', _clickListener);

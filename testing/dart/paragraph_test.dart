@@ -1,7 +1,8 @@
-// Copyright 2013 The Chromium Authors. All rights reserved.
+// Copyright 2013 The Flutter Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+// @dart = 2.6
 import 'dart:ui';
 
 import 'package:test/test.dart';
@@ -11,7 +12,7 @@ void main() {
   const double kAhemBaselineRatio = 1.25;
 
   test('predictably lays out a single-line paragraph', () {
-    for (double fontSize in <double>[10.0, 20.0, 30.0, 40.0]) {
+    for (final double fontSize in <double>[10.0, 20.0, 30.0, 40.0]) {
       final ParagraphBuilder builder = ParagraphBuilder(ParagraphStyle(
         fontFamily: 'Ahem',
         fontStyle: FontStyle.normal,
@@ -35,7 +36,7 @@ void main() {
   });
 
   test('predictably lays out a multi-line paragraph', () {
-    for (double fontSize in <double>[10.0, 20.0, 30.0, 40.0]) {
+    for (final double fontSize in <double>[10.0, 20.0, 30.0, 40.0]) {
       final ParagraphBuilder builder = ParagraphBuilder(ParagraphStyle(
         fontFamily: 'Ahem',
         fontStyle: FontStyle.normal,

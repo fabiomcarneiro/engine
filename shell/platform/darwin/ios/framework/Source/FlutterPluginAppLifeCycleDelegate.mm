@@ -2,12 +2,13 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include "flutter/shell/platform/darwin/ios/framework/Headers/FlutterPluginAppLifeCycleDelegate.h"
+#import "flutter/shell/platform/darwin/ios/framework/Headers/FlutterPluginAppLifeCycleDelegate.h"
+
 #include "flutter/fml/logging.h"
 #include "flutter/fml/paths.h"
 #include "flutter/lib/ui/plugins/callback_cache.h"
-#include "flutter/shell/platform/darwin/ios/framework/Headers/FlutterViewController.h"
-#include "flutter/shell/platform/darwin/ios/framework/Source/FlutterCallbackCache_Internal.h"
+#import "flutter/shell/platform/darwin/ios/framework/Headers/FlutterViewController.h"
+#import "flutter/shell/platform/darwin/ios/framework/Source/FlutterCallbackCache_Internal.h"
 
 static const char* kCallbackCacheSubDir = "Library/Caches/";
 
@@ -56,6 +57,7 @@ static const SEL selectorsHandledByPlugins[] = {
     [self addObserverFor:UIApplicationWillTerminateNotification
                 selector:@selector(handleWillTerminate:)];
     _delegates = [[NSPointerArray weakObjectsPointerArray] retain];
+    _debugBackgroundTask = UIBackgroundTaskInvalid;
   }
   return self;
 }
@@ -143,7 +145,10 @@ static BOOL isPowerOfTwo(NSUInteger x) {
   _debugBackgroundTask = [application
       beginBackgroundTaskWithName:@"Flutter debug task"
                 expirationHandler:^{
-                  [application endBackgroundTask:_debugBackgroundTask];
+                  if (_debugBackgroundTask != UIBackgroundTaskInvalid) {
+                    [application endBackgroundTask:_debugBackgroundTask];
+                    _debugBackgroundTask = UIBackgroundTaskInvalid;
+                  }
                   FML_LOG(WARNING)
                       << "\nThe OS has terminated the Flutter debug connection for being "
                          "inactive in the background for too long.\n\n"
@@ -164,7 +169,10 @@ static BOOL isPowerOfTwo(NSUInteger x) {
 - (void)handleWillEnterForeground:(NSNotification*)notification {
   UIApplication* application = [UIApplication sharedApplication];
 #if FLUTTER_RUNTIME_MODE == FLUTTER_RUNTIME_MODE_DEBUG
-  [application endBackgroundTask:_debugBackgroundTask];
+  if (_debugBackgroundTask != UIBackgroundTaskInvalid) {
+    [application endBackgroundTask:_debugBackgroundTask];
+    _debugBackgroundTask = UIBackgroundTaskInvalid;
+  }
 #endif  // FLUTTER_RUNTIME_MODE == FLUTTER_RUNTIME_MODE_DEBUG
   for (NSObject<FlutterApplicationLifeCycleDelegate>* delegate in _delegates) {
     if (!delegate) {
@@ -275,16 +283,28 @@ static BOOL isPowerOfTwo(NSUInteger x) {
 - (void)userNotificationCenter:(UNUserNotificationCenter*)center
        willPresentNotification:(UNNotification*)notification
          withCompletionHandler:
-             (void (^)(UNNotificationPresentationOptions options))completionHandler {
+             (void (^)(UNNotificationPresentationOptions options))completionHandler
+    NS_AVAILABLE_IOS(10_0) {
   if (@available(iOS 10.0, *)) {
     for (NSObject<FlutterApplicationLifeCycleDelegate>* delegate in _delegates) {
-      if (!delegate) {
-        continue;
-      }
       if ([delegate respondsToSelector:_cmd]) {
         [delegate userNotificationCenter:center
                  willPresentNotification:notification
                    withCompletionHandler:completionHandler];
+      }
+    }
+  }
+}
+
+- (void)userNotificationCenter:(UNUserNotificationCenter*)center
+    didReceiveNotificationResponse:(UNNotificationResponse*)response
+             withCompletionHandler:(void (^)(void))completionHandler NS_AVAILABLE_IOS(10_0) {
+  if (@available(iOS 10.0, *)) {
+    for (id<FlutterApplicationLifeCycleDelegate> delegate in _delegates) {
+      if ([delegate respondsToSelector:_cmd]) {
+        [delegate userNotificationCenter:center
+            didReceiveNotificationResponse:response
+                     withCompletionHandler:completionHandler];
       }
     }
   }

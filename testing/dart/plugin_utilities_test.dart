@@ -2,6 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+// @dart = 2.6
 import 'dart:ui';
 
 import 'package:test/test.dart';
@@ -14,7 +15,7 @@ class Foo {
   double getDouble() => 1.0;
 }
 
-const Foo foo = const Foo();
+const Foo foo = Foo();
 
 void main() {
   test('PluginUtilities Callback Handles', () {
@@ -41,7 +42,7 @@ void main() {
     expect(PluginUtilities.getCallbackHandle(foo.getDouble), isNull);
 
     // Anonymous closures cannot be looked up.
-    final Function anon = (int a, int b) => a + b;
+    final Function anon = (int a, int b) => a + b; // ignore: prefer_function_declarations_over_variables
     expect(PluginUtilities.getCallbackHandle(anon), isNull);
   });
 }

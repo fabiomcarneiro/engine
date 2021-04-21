@@ -20,6 +20,7 @@
 #include <minikin/Layout.h>
 
 #include <algorithm>
+#include <cstring>
 #include <limits>
 #include <map>
 #include <numeric>
@@ -193,11 +194,9 @@ static const float kDoubleDecorationSpacing = 3.0f;
 ParagraphTxt::GlyphPosition::GlyphPosition(double x_start,
                                            double x_advance,
                                            size_t code_unit_index,
-                                           size_t code_unit_width,
-                                           size_t cluster)
+                                           size_t code_unit_width)
     : code_units(code_unit_index, code_unit_index + code_unit_width),
-      x_pos(x_start, x_start + x_advance),
-      cluster(cluster) {}
+      x_pos(x_start, x_start + x_advance) {}
 
 void ParagraphTxt::GlyphPosition::Shift(double delta) {
   x_pos.Shift(delta);
@@ -230,13 +229,13 @@ void ParagraphTxt::CodeUnitRun::Shift(double delta) {
 }
 
 ParagraphTxt::ParagraphTxt() {
-  breaker_.setLocale(icu::Locale(), nullptr);
+  breaker_.setLocale();
 }
 
 ParagraphTxt::~ParagraphTxt() = default;
 
 void ParagraphTxt::SetText(std::vector<uint16_t> text, StyledRuns runs) {
-  needs_layout_ = true;
+  SetDirty(true);
   if (text.size() == 0)
     return;
   text_ = std::move(text);
@@ -285,7 +284,7 @@ bool ParagraphTxt::ComputeLineBreaks() {
     }
 
     // Setup breaker. We wait to set the line width in order to account for the
-    // widths of the inline placeholders, which are calcualted in the loop over
+    // widths of the inline placeholders, which are calculated in the loop over
     // the runs.
     breaker_.setLineWidths(0.0f, 0, width_);
     breaker_.setJustified(paragraph_style_.text_align == TextAlign::justify);
@@ -415,6 +414,9 @@ bool ParagraphTxt::ComputeBidiRuns(std::vector<BidiRun>* result) {
   //
   // This only applies to the final whitespace at the end as other whitespace is
   // no longer ambiguous when surrounded by additional text.
+
+  // TODO(garyq): Handle this in the text editor caret code instead at layout
+  // level.
   bool has_trailing_whitespace = false;
   int32_t bidi_run_start, bidi_run_length;
   if (bidi_run_count > 1) {
@@ -427,8 +429,17 @@ bool ParagraphTxt::ComputeBidiRuns(std::vector<BidiRun>* result) {
       U16_GET(text_.data(), 0, bidi_run_start + bidi_run_length - 1,
               static_cast<int>(text_.size()), last_char);
       if (u_hasBinaryProperty(last_char, UCHAR_WHITE_SPACE)) {
-        has_trailing_whitespace = true;
-        bidi_run_count--;
+        // Check if the trailing whitespace occurs before the previous run or
+        // not. If so, this trailing whitespace was a leading whitespace.
+        int32_t second_last_bidi_run_start, second_last_bidi_run_length;
+        ubidi_getVisualRun(bidi.get(), bidi_run_count - 2,
+                           &second_last_bidi_run_start,
+                           &second_last_bidi_run_length);
+        if (bidi_run_start ==
+            second_last_bidi_run_start + second_last_bidi_run_length) {
+          has_trailing_whitespace = true;
+          bidi_run_count--;
+        }
       }
     }
   }
@@ -542,20 +553,28 @@ void ParagraphTxt::ComputeStrut(StrutMetrics* strut, SkFont& font) {
     SkFontMetrics strut_metrics;
     font.getMetrics(&strut_metrics);
 
+    const double metrics_height =
+        -strut_metrics.fAscent + strut_metrics.fDescent;
+
     if (paragraph_style_.strut_has_height_override) {
-      double metrics_height = -strut_metrics.fAscent + strut_metrics.fDescent;
-      strut->ascent = (-strut_metrics.fAscent / metrics_height) *
-                      paragraph_style_.strut_height *
-                      paragraph_style_.strut_font_size;
-      strut->descent = (strut_metrics.fDescent / metrics_height) *
-                       paragraph_style_.strut_height *
-                       paragraph_style_.strut_font_size;
-      strut->leading =
-          // Zero leading if there is no user specified strut leading.
+      const double strut_height =
+          paragraph_style_.strut_height * paragraph_style_.strut_font_size;
+      const double metrics_leading =
+          // Zero extra leading if there is no user specified strut leading.
           paragraph_style_.strut_leading < 0
               ? 0
               : (paragraph_style_.strut_leading *
                  paragraph_style_.strut_font_size);
+
+      const double available_height =
+          paragraph_style_.strut_half_leading ? metrics_height : strut_height;
+
+      strut->ascent =
+          (-strut_metrics.fAscent / metrics_height) * available_height;
+      strut->descent =
+          (strut_metrics.fDescent / metrics_height) * available_height;
+
+      strut->leading = metrics_leading + strut_height - available_height;
     } else {
       strut->ascent = -strut_metrics.fAscent;
       strut->descent = strut_metrics.fDescent;
@@ -660,8 +679,8 @@ void ParagraphTxt::Layout(double width) {
   glyph_lines_.clear();
   code_unit_runs_.clear();
   inline_placeholder_code_unit_runs_.clear();
-  max_right_ = FLT_MIN;
-  min_left_ = FLT_MAX;
+  max_right_ = std::numeric_limits<double>::lowest();
+  min_left_ = std::numeric_limits<double>::max();
   final_line_count_ = 0;
 
   if (!ComputeLineBreaks())
@@ -796,6 +815,9 @@ void ParagraphTxt::Layout(double width) {
 
       std::shared_ptr<minikin::FontCollection> minikin_font_collection =
           GetMinikinFontCollectionForStyle(run.style());
+      if (!minikin_font_collection) {
+        return;
+      }
 
       // Lay out this run.
       uint16_t* text_ptr = text_.data();
@@ -895,8 +917,9 @@ void ParagraphTxt::Layout(double width) {
             blob_buffer.glyphs[blob_index] = layout.getGlyphId(glyph_index);
 
             size_t pos_index = blob_index * 2;
-            blob_buffer.pos[pos_index] =
-                layout.getX(glyph_index) + justify_x_offset_delta;
+            blob_buffer.pos[pos_index] = layout.getX(glyph_index) +
+                                         justify_x_offset +
+                                         justify_x_offset_delta;
             blob_buffer.pos[pos_index + 1] = layout.getY(glyph_index);
 
             if (glyph_index == cluster_start_glyph_index)
@@ -931,7 +954,7 @@ void ParagraphTxt::Layout(double width) {
                  offset < glyph_code_units.end; ++offset) {
               if (minikin::GraphemeBreak::isGraphemeBreak(
                       layout_advances.data(), text_ptr, text_start, text_count,
-                      offset)) {
+                      text_start + offset)) {
                 grapheme_code_unit_counts.push_back(code_unit_count);
                 code_unit_count = 1;
               } else {
@@ -940,14 +963,23 @@ void ParagraphTxt::Layout(double width) {
             }
             grapheme_code_unit_counts.push_back(code_unit_count);
           }
-          float glyph_advance = layout.getCharAdvance(glyph_code_units.start);
+          float glyph_advance;
+          if (run.is_placeholder_run()) {
+            // The placeholder run's layout should yield one glyph representing
+            // the object replacement character.  Replace its width with the
+            // placeholder's width.
+            FML_DCHECK(layout.nGlyphs() == 1);
+            glyph_advance = run.placeholder_run()->width;
+          } else {
+            glyph_advance = layout.getCharAdvance(glyph_code_units.start);
+          }
           float grapheme_advance =
               glyph_advance / grapheme_code_unit_counts.size();
 
           glyph_positions.emplace_back(run_x_offset + glyph_x_offset,
                                        grapheme_advance,
                                        run.start() + glyph_code_units.start,
-                                       grapheme_code_unit_counts[0], cluster);
+                                       grapheme_code_unit_counts[0]);
 
           // Compute positions for the additional graphemes in the ligature.
           for (size_t i = 1; i < grapheme_code_unit_counts.size(); ++i) {
@@ -955,7 +987,7 @@ void ParagraphTxt::Layout(double width) {
                 glyph_positions.back().x_pos.end, grapheme_advance,
                 glyph_positions.back().code_units.start +
                     grapheme_code_unit_counts[i - 1],
-                grapheme_code_unit_counts[i], cluster);
+                grapheme_code_unit_counts[i]);
           }
 
           bool at_word_start = false;
@@ -1005,19 +1037,11 @@ void ParagraphTxt::Layout(double width) {
         Range<double> record_x_pos(
             glyph_positions.front().x_pos.start - run_x_offset,
             glyph_positions.back().x_pos.end - run_x_offset);
-        if (run.is_placeholder_run()) {
-          paint_records.emplace_back(
-              run.style(), SkPoint::Make(run_x_offset + justify_x_offset, 0),
-              builder.make(), *metrics, line_number, record_x_pos.start,
-              record_x_pos.start + run.placeholder_run()->width, run.is_ghost(),
-              run.placeholder_run());
-          run_x_offset += run.placeholder_run()->width;
-        } else {
-          paint_records.emplace_back(
-              run.style(), SkPoint::Make(run_x_offset + justify_x_offset, 0),
-              builder.make(), *metrics, line_number, record_x_pos.start,
-              record_x_pos.end, run.is_ghost());
-        }
+        paint_records.emplace_back(run.style(), SkPoint::Make(run_x_offset, 0),
+                                   builder.make(), *metrics, line_number,
+                                   record_x_pos.start, record_x_pos.end,
+                                   run.is_ghost(), run.placeholder_run());
+
         justify_x_offset += justify_x_offset_delta;
 
         line_glyph_positions.insert(line_glyph_positions.end(),
@@ -1031,16 +1055,13 @@ void ParagraphTxt::Layout(double width) {
                     return a.code_units.start < b.code_units.start;
                   });
 
+        double blob_x_pos_start = glyph_positions.front().x_pos.start;
+        double blob_x_pos_end = glyph_positions.back().x_pos.end;
         line_code_unit_runs.emplace_back(
             std::move(code_unit_positions),
             Range<size_t>(run.start(), run.end()),
-            Range<double>(glyph_positions.front().x_pos.start,
-                          run.is_placeholder_run()
-                              ? glyph_positions.back().x_pos.start +
-                                    run.placeholder_run()->width
-                              : glyph_positions.back().x_pos.end),
-            line_number, *metrics, run.style(), run.direction(),
-            run.placeholder_run());
+            Range<double>(blob_x_pos_start, blob_x_pos_end), line_number,
+            *metrics, run.style(), run.direction(), run.placeholder_run());
 
         if (run.is_placeholder_run()) {
           line_inline_placeholder_code_unit_runs.push_back(
@@ -1048,24 +1069,27 @@ void ParagraphTxt::Layout(double width) {
         }
 
         if (!run.is_ghost()) {
-          min_left_ = std::min(min_left_, glyph_positions.front().x_pos.start);
-          max_right_ = std::max(max_right_, glyph_positions.back().x_pos.end);
+          min_left_ = std::min(min_left_, blob_x_pos_start);
+          max_right_ = std::max(max_right_, blob_x_pos_end);
         }
       }  // for each in glyph_blobs
 
-      // Do not increase x offset for LTR trailing ghost runs as it should not
-      // impact the layout of visible glyphs. RTL tailing ghost runs have the
-      // advance subtracted, so we do add the advance here to reset the
-      // run_x_offset. We do keep the record though so GetRectsForRange() can
-      // find metrics for trailing spaces.
-      if ((!run.is_ghost() || run.is_rtl()) && !run.is_placeholder_run()) {
-        run_x_offset += layout.getAdvance();
+      if (run.is_placeholder_run()) {
+        run_x_offset += run.placeholder_run()->width;
+      } else {
+        // Do not increase x offset for LTR trailing ghost runs as it should not
+        // impact the layout of visible glyphs. RTL tailing ghost runs have the
+        // advance subtracted, so we do add the advance here to reset the
+        // run_x_offset. We do keep the record though so GetRectsForRange() can
+        // find metrics for trailing spaces.
+        if (!run.is_ghost() || run.is_rtl()) {
+          run_x_offset += layout.getAdvance();
+        }
       }
     }  // for each in line_runs
 
     // Adjust the glyph positions based on the alignment of the line.
-    double line_x_offset =
-        GetLineXOffset(run_x_offset, line_number, line_limit);
+    double line_x_offset = GetLineXOffset(run_x_offset, justify_line);
     if (line_x_offset) {
       for (CodeUnitRun& code_unit_run : line_code_unit_runs) {
         code_unit_run.Shift(line_x_offset);
@@ -1093,42 +1117,16 @@ void ParagraphTxt::Layout(double width) {
 
     // Calculate the amount to advance in the y direction. This is done by
     // computing the maximum ascent and descent with respect to the strut.
-    double max_ascent = strut_.ascent + strut_.half_leading;
-    double max_descent = strut_.descent + strut_.half_leading;
+    double max_ascent = IsStrutValid() ? strut_.ascent + strut_.half_leading
+                                       : std::numeric_limits<double>::lowest();
+    double max_descent = IsStrutValid() ? strut_.descent + strut_.half_leading
+                                        : std::numeric_limits<double>::lowest();
     double max_unscaled_ascent = 0;
-    auto update_line_metrics = [&](const SkFontMetrics& metrics,
-                                   const TextStyle& style,
-                                   PlaceholderRun* placeholder_run) {
-      if (!strut_.force_strut) {
-        double ascent;
-        double descent;
-        if (style.has_height_override) {
-          // Scale the ascent and descent such that the sum of ascent and
-          // descent is `fontsize * style.height * style.font_size`.
-          double metrics_height = -metrics.fAscent + metrics.fDescent;
-          ascent = (-metrics.fAscent / metrics_height) * style.height *
-                   style.font_size;
-          descent = (metrics.fDescent / metrics_height) * style.height *
-                    style.font_size;
-        } else {
-          // Use the font-provided ascent, descent, and leading directly.
-          ascent = (-metrics.fAscent + metrics.fLeading / 2);
-          descent = (metrics.fDescent + metrics.fLeading / 2);
-        }
-        ComputePlaceholder(placeholder_run, ascent, descent);
-
-        max_ascent = std::max(ascent, max_ascent);
-        max_descent = std::max(descent, max_descent);
-      }
-
-      max_unscaled_ascent = std::max(placeholder_run == nullptr
-                                         ? -metrics.fAscent
-                                         : placeholder_run->baseline_offset,
-                                     max_unscaled_ascent);
-    };
     for (const PaintRecord& paint_record : paint_records) {
-      update_line_metrics(paint_record.metrics(), paint_record.style(),
-                          paint_record.GetPlaceholderRun());
+      UpdateLineMetrics(paint_record.metrics(), paint_record.style(),
+                        max_ascent, max_descent, max_unscaled_ascent,
+                        paint_record.GetPlaceholderRun(), line_number,
+                        line_limit);
     }
 
     // If no fonts were actually rendered, then compute a baseline based on the
@@ -1139,7 +1137,8 @@ void ParagraphTxt::Layout(double width) {
       font.setTypeface(GetDefaultSkiaTypeface(style));
       font.setSize(style.font_size);
       font.getMetrics(&metrics);
-      update_line_metrics(metrics, style, nullptr);
+      UpdateLineMetrics(metrics, style, max_ascent, max_descent,
+                        max_unscaled_ascent, nullptr, line_number, line_limit);
     }
 
     // Calculate the baselines. This is only done on the first line.
@@ -1190,9 +1189,120 @@ void ParagraphTxt::Layout(double width) {
   longest_line_ = max_right_ - min_left_;
 }
 
+void ParagraphTxt::UpdateLineMetrics(const SkFontMetrics& metrics,
+                                     const TextStyle& style,
+                                     double& max_ascent,
+                                     double& max_descent,
+                                     double& max_unscaled_ascent,
+                                     PlaceholderRun* placeholder_run,
+                                     size_t line_number,
+                                     size_t line_limit) {
+  if (!strut_.force_strut) {
+    const double metrics_font_height = metrics.fDescent - metrics.fAscent;
+    // The overall height of the glyph blob. If neither the ascent or the
+    // descent is disabled, we have block_height = ascent + descent, where
+    // "ascent" is the extent from the top of the blob to its baseline, and
+    // "descent" is the extent from the text blob's baseline to its bottom. Not
+    // to be mistaken with the font's ascent and descent.
+    const double blob_height = style.has_height_override
+                                   ? style.height * style.font_size
+                                   : metrics_font_height + metrics.fLeading;
+
+    // Scale the ascent and descent such that the sum of ascent and
+    // descent is `style.height * style.font_size`.
+    //
+    // The raw metrics do not add up to fontSize. The state of font
+    // metrics is a mess:
+    //
+    // Each font has 4 sets of vertical metrics:
+    //
+    // * hhea: hheaAscender, hheaDescender, hheaLineGap.
+    //     Used by Apple.
+    // * OS/2 typo: typoAscender, typoDescender, typoLineGap.
+    //     Used sometimes by Windows for layout.
+    // * OS/2 win: winAscent, winDescent.
+    //     Also used by Windows, generally will be cut if extends past
+    //     these metrics.
+    // * EM Square: ascent, descent
+    //     Not actively used, but this defines the 'scale' of the
+    //     units used.
+    //
+    // `Use Typo Metrics` is a boolean that, when enabled, prefers
+    // typo metrics over win metrics. Default is off. Enabled by most
+    // modern fonts.
+    //
+    // In addition to these different sets of metrics, there are also
+    // multiple strategies for using these metrics:
+    //
+    // * Adobe: Set hhea values to typo equivalents.
+    // * Microsoft: Set hhea values to win equivalents.
+    // * Web: Use hhea values for text, regardless of `Use Typo Metrics`
+    //     The hheaLineGap is distributed half across the top and half
+    //     across the bottom of the line.
+    //   Exceptions:
+    //     Windows: All browsers respect `Use Typo Metrics`
+    //     Firefox respects `Use Typo Metrics`.
+    //
+    // This pertains to this code in that it is ambiguous which set of
+    // metrics we are actually using via SkFontMetrics. This in turn
+    // means that if we use the raw metrics, we will see differences
+    // between platforms as well as unpredictable line heights.
+    //
+    // A more thorough explanation is available at
+    // https://glyphsapp.com/tutorials/vertical-metrics
+    //
+    // Doing this ascent/descent normalization to the EM Square allows
+    // a sane, consistent, and reasonable "blob_height" to be specified,
+    // though it breaks with what is done by any of the platforms above.
+    const bool shouldNormalizeFont =
+        style.has_height_override && !style.half_leading;
+    const double font_height =
+        shouldNormalizeFont ? style.font_size : metrics_font_height;
+
+    // Reserve the outermost vertical space we want to distribute evenly over
+    // and under the text ("half-leading").
+    double leading;
+    if (style.half_leading) {
+      leading = blob_height - font_height;
+    } else {
+      leading = style.has_height_override ? 0.0 : metrics.fLeading;
+    }
+    const double half_leading = leading / 2;
+
+    // Proportionally distribute the remaining vertical space above and below
+    // the glyph blob's baseline, per the font's ascent/discent ratio.
+    const double available_vspace = blob_height - leading;
+    const double modifiedAscent =
+        -metrics.fAscent / metrics_font_height * available_vspace +
+        half_leading;
+    const double modifiedDescent =
+        metrics.fDescent / metrics_font_height * available_vspace +
+        half_leading;
+
+    const bool disableAscent =
+        line_number == 0 && paragraph_style_.text_height_behavior &
+                                TextHeightBehavior::kDisableFirstAscent;
+    const bool disableDescent = line_number == line_limit - 1 &&
+                                paragraph_style_.text_height_behavior &
+                                    TextHeightBehavior::kDisableLastDescent;
+
+    double ascent = disableAscent ? -metrics.fAscent : modifiedAscent;
+    double descent = disableDescent ? metrics.fDescent : modifiedDescent;
+
+    ComputePlaceholder(placeholder_run, ascent, descent);
+
+    max_ascent = std::max(ascent, max_ascent);
+    max_descent = std::max(descent, max_descent);
+  }
+
+  max_unscaled_ascent =
+      std::max(placeholder_run == nullptr ? -metrics.fAscent
+                                          : placeholder_run->baseline_offset,
+               max_unscaled_ascent);
+};
+
 double ParagraphTxt::GetLineXOffset(double line_total_advance,
-                                    size_t line_number,
-                                    size_t line_limit) {
+                                    bool justify_line) {
   if (isinf(width_))
     return 0;
 
@@ -1201,7 +1311,7 @@ double ParagraphTxt::GetLineXOffset(double line_total_advance,
   if (align == TextAlign::right ||
       (align == TextAlign::justify &&
        paragraph_style_.text_direction == TextDirection::rtl &&
-       line_number == line_limit - 1)) {
+       !justify_line)) {
     return width_ - line_total_advance;
   } else if (align == TextAlign::center) {
     return (width_ - line_total_advance) / 2;
@@ -1215,37 +1325,45 @@ const ParagraphStyle& ParagraphTxt::GetParagraphStyle() const {
 }
 
 double ParagraphTxt::GetAlphabeticBaseline() {
+  FML_DCHECK(!needs_layout_) << "only valid after layout";
   // Currently -fAscent
   return alphabetic_baseline_;
 }
 
 double ParagraphTxt::GetIdeographicBaseline() {
+  FML_DCHECK(!needs_layout_) << "only valid after layout";
   // TODO(garyq): Currently -fAscent + fUnderlinePosition. Verify this.
   return ideographic_baseline_;
 }
 
 double ParagraphTxt::GetMaxIntrinsicWidth() {
+  FML_DCHECK(!needs_layout_) << "only valid after layout";
   return max_intrinsic_width_;
 }
 
 double ParagraphTxt::GetMinIntrinsicWidth() {
+  FML_DCHECK(!needs_layout_) << "only valid after layout";
   return min_intrinsic_width_;
 }
 
 size_t ParagraphTxt::TextSize() const {
+  FML_DCHECK(!needs_layout_) << "only valid after layout";
   return text_.size();
 }
 
 double ParagraphTxt::GetHeight() {
+  FML_DCHECK(!needs_layout_) << "only valid after layout";
   return final_line_count_ == 0 ? 0
                                 : line_metrics_[final_line_count_ - 1].height;
 }
 
 double ParagraphTxt::GetMaxWidth() {
+  FML_DCHECK(!needs_layout_) << "only valid after layout";
   return width_;
 }
 
 double ParagraphTxt::GetLongestLine() {
+  FML_DCHECK(!needs_layout_) << "only valid after layout";
   return longest_line_;
 }
 
@@ -1448,7 +1566,7 @@ void ParagraphTxt::PaintDecorations(SkCanvas* canvas,
                   kDoubleDecorationSpacing / -2.0;
       y_offset +=
           (metrics.fFlags &
-           SkFontMetrics::FontMetricsFlags::kStrikeoutThicknessIsValid_Flag)
+           SkFontMetrics::FontMetricsFlags::kStrikeoutPositionIsValid_Flag)
               ? metrics.fStrikeoutPosition
               // Backup value if the strikeoutposition metric is not
               // available:
@@ -1546,20 +1664,22 @@ std::vector<Paragraph::TextBox> ParagraphTxt::GetRectsForRange(
     size_t end,
     RectHeightStyle rect_height_style,
     RectWidthStyle rect_width_style) {
+  FML_DCHECK(!needs_layout_) << "only valid after layout";
   // Struct that holds calculated metrics for each line.
   struct LineBoxMetrics {
     std::vector<Paragraph::TextBox> boxes;
     // Per-line metrics for max and min coordinates for left and right boxes.
     // These metrics cannot be calculated in layout generically because of
     // selections that do not cover the whole line.
-    SkScalar max_right = FLT_MIN;
-    SkScalar min_left = FLT_MAX;
+    SkScalar max_right = std::numeric_limits<SkScalar>::lowest();
+    SkScalar min_left = std::numeric_limits<SkScalar>::max();
   };
 
   std::map<size_t, LineBoxMetrics> line_box_metrics;
   // Text direction of the first line so we can extend the correct side for
   // RectWidthStyle::kMax.
   TextDirection first_line_dir = TextDirection::ltr;
+  std::map<size_t, size_t> newline_x_positions;
 
   // Lines that are actually in the requested range.
   size_t max_line = 0;
@@ -1571,6 +1691,11 @@ std::vector<Paragraph::TextBox> ParagraphTxt::GetRectsForRange(
     // Check to see if we are finished.
     if (run.code_units.start >= end)
       break;
+
+    // Update new line x position with the ending of last bidi run on the line
+    newline_x_positions[run.line_number] =
+        run.direction == TextDirection::ltr ? run.x_pos.end : run.x_pos.start;
+
     if (run.code_units.end <= start)
       continue;
 
@@ -1641,11 +1766,12 @@ std::vector<Paragraph::TextBox> ParagraphTxt::GetRectsForRange(
     if (line_box_metrics.find(line_number) == line_box_metrics.end()) {
       if (line.end_index != line.end_including_newline &&
           line.end_index >= start && line.end_including_newline <= end) {
-        SkScalar x = line_widths_[line_number];
-        // Move empty box to center if center aligned and is an empty line.
-        if (x == 0 && !isinf(width_) &&
-            paragraph_style_.effective_align() == TextAlign::center) {
-          x = width_ / 2;
+        SkScalar x;
+        auto it = newline_x_positions.find(line_number);
+        if (it != newline_x_positions.end()) {
+          x = it->second;
+        } else {
+          x = GetLineXOffset(0, false);
         }
         SkScalar top =
             (line_number > 0) ? line_metrics_[line_number - 1].height : 0;
@@ -1691,8 +1817,7 @@ std::vector<Paragraph::TextBox> ParagraphTxt::GetRectsForRange(
     } else if (rect_height_style == RectHeightStyle::kMax) {
       for (const Paragraph::TextBox& box : kv.second.boxes) {
         boxes.emplace_back(
-            SkRect::MakeLTRB(box.rect.fLeft,
-                             line.baseline - line.unscaled_ascent,
+            SkRect::MakeLTRB(box.rect.fLeft, line.baseline - line.ascent,
                              box.rect.fRight, line.baseline + line.descent),
             box.direction);
       }
@@ -1757,6 +1882,7 @@ std::vector<Paragraph::TextBox> ParagraphTxt::GetRectsForRange(
 Paragraph::PositionWithAffinity ParagraphTxt::GetGlyphPositionAtCoordinate(
     double dx,
     double dy) {
+  FML_DCHECK(!needs_layout_) << "only valid after layout";
   if (final_line_count_ <= 0)
     return PositionWithAffinity(0, DOWNSTREAM);
 
@@ -1779,35 +1905,18 @@ Paragraph::PositionWithAffinity ParagraphTxt::GetGlyphPositionAtCoordinate(
 
   size_t x_index;
   const GlyphPosition* gp = nullptr;
-  const GlyphPosition* gp_cluster = nullptr;
-  bool is_cluster_corection = false;
   for (x_index = 0; x_index < line_glyph_position.size(); ++x_index) {
     double glyph_end = (x_index < line_glyph_position.size() - 1)
                            ? line_glyph_position[x_index + 1].x_pos.start
                            : line_glyph_position[x_index].x_pos.end;
-    if (gp_cluster == nullptr ||
-        gp_cluster->cluster != line_glyph_position[x_index].cluster) {
-      gp_cluster = &line_glyph_position[x_index];
-    }
     if (dx < glyph_end) {
-      // Check if the glyph position is part of a cluster. If it is,
-      // we assign the cluster's root GlyphPosition to represent it.
-      if (gp_cluster->cluster == line_glyph_position[x_index].cluster) {
-        gp = gp_cluster;
-        // Detect if the matching GlyphPosition was non-root for the cluster.
-        if (gp_cluster != &line_glyph_position[x_index]) {
-          is_cluster_corection = true;
-        }
-      } else {
-        gp = &line_glyph_position[x_index];
-      }
+      gp = &line_glyph_position[x_index];
       break;
     }
   }
 
   if (gp == nullptr) {
-    const GlyphPosition& last_glyph = line_glyph_position.back();
-    return PositionWithAffinity(last_glyph.code_units.end, UPSTREAM);
+    gp = &line_glyph_position.back();
   }
 
   // Find the direction of the run that contains this glyph.
@@ -1821,13 +1930,8 @@ Paragraph::PositionWithAffinity ParagraphTxt::GetGlyphPositionAtCoordinate(
   }
 
   double glyph_center = (gp->x_pos.start + gp->x_pos.end) / 2;
-  // We want to use the root cluster's start when the cluster
-  // was corrected.
-  // TODO(garyq): Detect if the position is in the middle of the cluster
-  // and properly assign the start/end positions.
   if ((direction == TextDirection::ltr && dx < glyph_center) ||
-      (direction == TextDirection::rtl && dx >= glyph_center) ||
-      is_cluster_corection) {
+      (direction == TextDirection::rtl && dx >= glyph_center)) {
     return PositionWithAffinity(gp->code_units.start, DOWNSTREAM);
   } else {
     return PositionWithAffinity(gp->code_units.end, UPSTREAM);
@@ -1837,14 +1941,15 @@ Paragraph::PositionWithAffinity ParagraphTxt::GetGlyphPositionAtCoordinate(
 // We don't cache this because since this returns all boxes, it is usually
 // unnecessary to call this multiple times in succession.
 std::vector<Paragraph::TextBox> ParagraphTxt::GetRectsForPlaceholders() {
+  FML_DCHECK(!needs_layout_) << "only valid after layout";
   // Struct that holds calculated metrics for each line.
   struct LineBoxMetrics {
     std::vector<Paragraph::TextBox> boxes;
     // Per-line metrics for max and min coordinates for left and right boxes.
     // These metrics cannot be calculated in layout generically because of
     // selections that do not cover the whole line.
-    SkScalar max_right = FLT_MIN;
-    SkScalar min_left = FLT_MAX;
+    SkScalar max_right = std::numeric_limits<SkScalar>::lowest();
+    SkScalar min_left = std::numeric_limits<SkScalar>::max();
   };
 
   std::vector<Paragraph::TextBox> boxes;
@@ -1875,6 +1980,7 @@ std::vector<Paragraph::TextBox> ParagraphTxt::GetRectsForPlaceholders() {
 }
 
 Paragraph::Range<size_t> ParagraphTxt::GetWordBoundary(size_t offset) {
+  FML_DCHECK(!needs_layout_) << "only valid after layout";
   if (text_.size() == 0)
     return Range<size_t>(0, 0);
 
@@ -1898,10 +2004,12 @@ Paragraph::Range<size_t> ParagraphTxt::GetWordBoundary(size_t offset) {
 }
 
 size_t ParagraphTxt::GetLineCount() {
+  FML_DCHECK(!needs_layout_) << "only valid after layout";
   return final_line_count_;
 }
 
 bool ParagraphTxt::DidExceedMaxLines() {
+  FML_DCHECK(!needs_layout_) << "only valid after layout";
   return did_exceed_max_lines_;
 }
 
@@ -1910,6 +2018,7 @@ void ParagraphTxt::SetDirty(bool dirty) {
 }
 
 std::vector<LineMetrics>& ParagraphTxt::GetLineMetrics() {
+  FML_DCHECK(!needs_layout_) << "only valid after layout";
   return line_metrics_;
 }
 

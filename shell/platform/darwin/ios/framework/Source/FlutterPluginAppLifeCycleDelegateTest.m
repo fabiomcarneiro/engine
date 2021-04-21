@@ -4,18 +4,13 @@
 
 #import <OCMock/OCMock.h>
 #import <XCTest/XCTest.h>
+
+#import "flutter/shell/platform/darwin/common/framework/Headers/FlutterMacros.h"
 #import "flutter/shell/platform/darwin/ios/framework/Headers/FlutterPluginAppLifeCycleDelegate.h"
 
-#ifndef __has_feature
-#define __has_feature(x) 0 /* for non-clang compilers */
-#endif
-
-#if !__has_feature(objc_arc)
-#error ARC must be enabled!
-#endif
+FLUTTER_ASSERT_ARC
 
 @interface FlutterPluginAppLifeCycleDelegateTest : XCTestCase
-
 @end
 
 @implementation FlutterPluginAppLifeCycleDelegateTest
@@ -26,51 +21,71 @@
 }
 
 - (void)testDidEnterBackground {
+  XCTNSNotificationExpectation* expectation = [[XCTNSNotificationExpectation alloc]
+      initWithName:UIApplicationDidEnterBackgroundNotification];
   FlutterPluginAppLifeCycleDelegate* delegate = [[FlutterPluginAppLifeCycleDelegate alloc] init];
   id plugin = OCMProtocolMock(@protocol(FlutterPlugin));
   [delegate addDelegate:plugin];
   [[NSNotificationCenter defaultCenter]
       postNotificationName:UIApplicationDidEnterBackgroundNotification
                     object:nil];
+
+  [self waitForExpectations:@[ expectation ] timeout:5.0];
   OCMVerify([plugin applicationDidEnterBackground:[UIApplication sharedApplication]]);
 }
 
 - (void)testWillEnterForeground {
+  XCTNSNotificationExpectation* expectation = [[XCTNSNotificationExpectation alloc]
+      initWithName:UIApplicationWillEnterForegroundNotification];
+
   FlutterPluginAppLifeCycleDelegate* delegate = [[FlutterPluginAppLifeCycleDelegate alloc] init];
   id plugin = OCMProtocolMock(@protocol(FlutterPlugin));
   [delegate addDelegate:plugin];
   [[NSNotificationCenter defaultCenter]
       postNotificationName:UIApplicationWillEnterForegroundNotification
                     object:nil];
+  [self waitForExpectations:@[ expectation ] timeout:5.0];
   OCMVerify([plugin applicationWillEnterForeground:[UIApplication sharedApplication]]);
 }
 
 - (void)testWillResignActive {
+  XCTNSNotificationExpectation* expectation =
+      [[XCTNSNotificationExpectation alloc] initWithName:UIApplicationWillResignActiveNotification];
+
   FlutterPluginAppLifeCycleDelegate* delegate = [[FlutterPluginAppLifeCycleDelegate alloc] init];
   id plugin = OCMProtocolMock(@protocol(FlutterPlugin));
   [delegate addDelegate:plugin];
   [[NSNotificationCenter defaultCenter]
       postNotificationName:UIApplicationWillResignActiveNotification
                     object:nil];
+  [self waitForExpectations:@[ expectation ] timeout:5.0];
   OCMVerify([plugin applicationWillResignActive:[UIApplication sharedApplication]]);
 }
 
 - (void)testDidBecomeActive {
+  XCTNSNotificationExpectation* expectation =
+      [[XCTNSNotificationExpectation alloc] initWithName:UIApplicationDidBecomeActiveNotification];
+
   FlutterPluginAppLifeCycleDelegate* delegate = [[FlutterPluginAppLifeCycleDelegate alloc] init];
   id plugin = OCMProtocolMock(@protocol(FlutterPlugin));
   [delegate addDelegate:plugin];
   [[NSNotificationCenter defaultCenter]
       postNotificationName:UIApplicationDidBecomeActiveNotification
                     object:nil];
+  [self waitForExpectations:@[ expectation ] timeout:5.0];
   OCMVerify([plugin applicationDidBecomeActive:[UIApplication sharedApplication]]);
 }
 
 - (void)testWillTerminate {
+  XCTNSNotificationExpectation* expectation =
+      [[XCTNSNotificationExpectation alloc] initWithName:UIApplicationWillTerminateNotification];
+
   FlutterPluginAppLifeCycleDelegate* delegate = [[FlutterPluginAppLifeCycleDelegate alloc] init];
   id plugin = OCMProtocolMock(@protocol(FlutterPlugin));
   [delegate addDelegate:plugin];
   [[NSNotificationCenter defaultCenter] postNotificationName:UIApplicationWillTerminateNotification
                                                       object:nil];
+  [self waitForExpectations:@[ expectation ] timeout:5.0];
   OCMVerify([plugin applicationWillTerminate:[UIApplication sharedApplication]]);
 }
 

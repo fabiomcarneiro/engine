@@ -2,6 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+// @dart = 2.6
 import 'dart:async';
 import 'dart:io';
 import 'dart:typed_data';
@@ -13,8 +14,8 @@ import 'package:test/test.dart';
 const int _kWidth = 10;
 const int _kRadius = 2;
 
-const Color _kBlack = const Color.fromRGBO(0, 0, 0, 1.0);
-const Color _kGreen = const Color.fromRGBO(0, 255, 0, 1.0);
+const Color _kBlack = Color.fromRGBO(0, 0, 0, 1.0);
+const Color _kGreen = Color.fromRGBO(0, 255, 0, 1.0);
 
 void main() {
   group('Image.toByteData', () {
@@ -83,12 +84,13 @@ class Square4x4Image {
     canvas.drawRect(Rect.fromLTWH(0.0, 0.0, width, width), black);
     canvas.drawRect(
         Rect.fromLTWH(radius, radius, innerWidth, innerWidth), green);
-    return await recorder.endRecording().toImage(_kWidth, _kWidth);
+    return recorder.endRecording().toImage(_kWidth, _kWidth);
   }
 
   static List<int> get bytes {
     const int bytesPerChannel = 4;
-    final List<int> result = List<int>(_kWidth * _kWidth * bytesPerChannel);
+    final List<int> result = List<int>.filled(
+        _kWidth * _kWidth * bytesPerChannel, 0);
 
     void fillWithColor(Color color, int min, int max) {
       for (int i = min; i < max; i++) {
@@ -113,10 +115,10 @@ class GrayscaleImage {
   GrayscaleImage._();
 
   static Future<Image> load() async {
-    final Uint8List bytes = await readFile('4x4.png');
+    final Uint8List bytes = await readFile('2x2.png');
     final Completer<Image> completer = Completer<Image>();
     decodeImageFromList(bytes, (Image image) => completer.complete(image));
-    return await completer.future;
+    return completer.future;
   }
 
   static List<int> get bytesAsRgba {
@@ -133,5 +135,5 @@ class GrayscaleImage {
 
 Future<Uint8List> readFile(String fileName) async {
   final File file = File(path.join('flutter', 'testing', 'resources', fileName));
-  return await file.readAsBytes();
+  return file.readAsBytes();
 }
